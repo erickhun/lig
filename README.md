@@ -2,6 +2,9 @@
 
 `lig`  integration between Linear (project management tool) and Git. Quickly create branches from issues assigned to you, view issues, and update issue statuses directly from the terminal.
 
+![Demo of the project](lig-demo.gif)
+
+
 ## Features
 
 - 🌿 **Branch Creation**: Easily create Git branches from Linear issues
