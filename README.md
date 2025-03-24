@@ -14,6 +14,7 @@
 ## Prerequisites
 
 - `fzf` ([fuzzy finder](https://github.com/junegunn/fzf?tab=readme-ov-file#installation))
+- [jq](https://jqlang.org/)
 - [Linear](https://linear.app/) API key (Settings-> Security & Access -> Personal API Keys)
 
 ## Installation

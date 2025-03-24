@@ -260,7 +260,7 @@ function lig-branch() {
 # Open a Linear issue from terminal
 function lig-view() {
   check_git_repo || return 1
-  local issue_id
+  local api_key issue_id
   
   # Get the issue ID from either the argument or branch name
   if [ -n "$1" ]; then
@@ -271,7 +271,152 @@ function lig-view() {
     issue_id=$(echo $current_branch | grep -o '^[A-Z0-9]\+-[0-9]\+' || echo "")
   fi
   
-  if [ -n "$issue_id" ]; then
+  if [ -z "$issue_id" ]; then
+    echo "No issue ID provided or found in branch name."
+    return 1
+  fi
+  
+  # Get API key from LINEAR_KEY environment variable
+  api_key=${LINEAR_KEY}
+  
+  if [ -z "$api_key" ]; then
+    echo "LINEAR_KEY environment variable not set"
+    return 1
+  fi
+  
+  # Check if jq is installed
+  if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed. Please install jq to use this feature."
+    echo "Visit: https://stedolan.github.io/jq/download/"
+    return 1
+  fi
+  
+  # Fetch issue information
+  echo "Fetching issue information..."
+  issue_query="{\"query\":\"query { issue(id: \\\"$issue_id\\\") { id title description createdAt updatedAt priority dueDate assignee { name } team { name } state { name } comments { nodes { id body user { name } createdAt } } } }\"}"
+  
+  issue_response=$(curl \
+    --header "Content-Type: application/json" \
+    --header "Authorization: $api_key" \
+    --silent \
+    --data "$issue_query" \
+    "https://api.linear.app/graphql")
+  
+  # Clean up the response - remove control characters that can cause jq to fail
+  clean_response=$(echo "$issue_response" | tr -d '\000-\037')
+  
+  # Check if we have a valid response
+  if ! echo "$clean_response" | jq -e '.data.issue' > /dev/null 2>&1; then
+    echo "Error fetching issue information. Response:"
+    echo "$clean_response" | jq '.'
+    return 1
+  fi
+  
+  # Extract issue details safely with fallbacks
+  title=$(echo "$clean_response" | jq -r '.data.issue.title // "Unknown"')
+  description=$(echo "$clean_response" | jq -r '.data.issue.description // ""')
+  state=$(echo "$clean_response" | jq -r '.data.issue.state.name // "Unknown"')
+  priority=$(echo "$clean_response" | jq -r '.data.issue.priority')
+  due_date=$(echo "$clean_response" | jq -r '.data.issue.dueDate')
+  
+  # Handle potentially null values
+  assignee=$(echo "$clean_response" | jq -r '.data.issue.assignee.name // "Unassigned"')
+  team=$(echo "$clean_response" | jq -r '.data.issue.team.name // "Unknown"')
+  created_at=$(echo "$clean_response" | jq -r '.data.issue.createdAt // "Unknown"')
+  updated_at=$(echo "$clean_response" | jq -r '.data.issue.updatedAt // "Unknown"')
+  
+  # Format priority
+  case $priority in
+    1) priority_display="\033[1;31mUrgent\033[0m" ;;
+    2) priority_display="\033[0;31mHigh\033[0m" ;;
+    3) priority_display="\033[0;33mMedium\033[0m" ;;
+    4) priority_display="\033[0;32mLow\033[0m" ;;
+    *) priority_display="\033[0;37mNo priority\033[0m" ;;
+  esac
+  
+  # Format due date
+  if [ "$due_date" = "null" ] || [ -z "$due_date" ]; then
+    due_display="\033[0;37mNone\033[0m"
+  else
+    today=$(date +%Y-%m-%d)
+    if [ "$due_date" = "$today" ]; then
+      due_display="\033[1;33m$due_date (Today)\033[0m"
+    elif [[ "$due_date" < "$today" ]]; then
+      due_display="\033[1;31m$due_date (Overdue)\033[0m"
+    else
+      due_display="\033[0;32m$due_date\033[0m"
+    fi
+  fi
+  
+  # Format dates - handle ISO date format
+  if [ "$created_at" != "null" ] && [ "$created_at" != "Unknown" ]; then
+    created_date=$(echo "$created_at" | sed 's/T/ /;s/\.[0-9]*Z$//')
+  else
+    created_date="Unknown"
+  fi
+  
+  if [ "$updated_at" != "null" ] && [ "$updated_at" != "Unknown" ]; then
+    updated_date=$(echo "$updated_at" | sed 's/T/ /;s/\.[0-9]*Z$//')
+  else
+    updated_date="Unknown"
+  fi
+  
+  # Clear screen for better readability
+  clear
+  
+  # Display formatted issue header with box drawing characters
+  echo "╔════════════════════════════════════════════════════════════════════════════╗"
+  echo -e "║ \033[1;36mISSUE $issue_id\033[0m                                                          ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════╝"
+  echo -e "\033[1;37mTitle:\033[0m $title"
+  echo
+  echo -e "\033[1;37mTeam:\033[0m $team"
+  echo -e "\033[1;37mStatus:\033[0m \033[0;36m$state\033[0m"
+  echo -e "\033[1;37mPriority:\033[0m $priority_display"
+  echo -e "\033[1;37mDue Date:\033[0m $due_display"
+  echo -e "\033[1;37mAssignee:\033[0m $assignee"
+  echo -e "\033[1;37mCreated:\033[0m $created_date"
+  echo -e "\033[1;37mUpdated:\033[0m $updated_date"
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "\033[1;37mDescription:\033[0m"
+  if [ -z "$description" ] || [ "$description" = "null" ]; then
+    echo "  No description provided."
+  else
+    # Format description with line wrapping at 80 chars
+    echo "$description" | tr -d '\000-\037' | fold -s -w 80 | sed 's/^/  /'
+  fi
+  
+  # Extract and display recent comments - with safer handling
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "\033[1;37mRecent Comments:\033[0m"
+  
+  # Check if comments data exists safely
+  if echo "$clean_response" | jq -e '.data.issue.comments.nodes | length > 0' > /dev/null 2>&1; then
+    # Process comments more safely
+    echo "$clean_response" | jq -r '.data.issue.comments.nodes[] | 
+      "  \u001b[1;34m" + 
+      (if .user != null and .user.name != null then .user.name else "Unknown User" end) + 
+      "\u001b[0m (\u001b[0;37m" + 
+      (if .createdAt != null then (.createdAt | sub("T"; " ") | sub("\\.[0-9]*Z$"; "")) else "Unknown Date" end) + 
+      "\u001b[0m):\n" + 
+      (if .body != null then .body else "No content" end)' |
+    while IFS= read -r line; do
+      # Process and format each line of the comment
+      echo "$line" | fold -s -w 76 | sed 's/^/    /'
+    done
+  else
+    echo "  No comments."
+  fi
+  
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "Web URL: \033[4;34mhttps://linear.app/issue/$issue_id\033[0m"
+  echo
+  
+  # Ask if user wants to open in browser
+  echo -n "Open in browser? [Y/n] "
+  read open_answer
+  
+  if [[ ! "$open_answer" =~ ^[Nn]$ ]]; then
     # Try to open with xdg-open (Linux), open (macOS), or start (Windows)
     if command -v xdg-open &> /dev/null; then
       xdg-open "https://linear.app/issue/$issue_id"
@@ -282,9 +427,6 @@ function lig-view() {
     else
       echo "Cannot open browser. URL: https://linear.app/issue/$issue_id"
     fi
-  else
-    echo "No issue ID provided or found in branch name."
-    return 1
   fi
 }
 
