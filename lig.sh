@@ -289,7 +289,6 @@ function lig-view() {
 }
 
 # Update the status of a Linear issue
-# Update the status of a Linear issue
 function lig-status() {
   check_git_repo || return 1
   local api_key issue_id team_id
@@ -395,34 +394,56 @@ function lig-status() {
     --data "$states_query" \
     "https://api.linear.app/graphql")
   
-  # Extract states and hide the IDs but keep them in the selection data
-  states_list=$(echo "$states_response" | grep -o '"id":"[^"]*","name":"[^"]*","type":"[^"]*"' | 
-    sed 's/"id":"\([^"]*\)","name":"\([^"]*\)","type":"\([^"]*\)"/\1|\2 (\3)/')
+  # Create a temporary file for mapping between displayed state names and their IDs
+  temp_map_file=$(mktemp)
   
-  if [ -z "$states_list" ]; then
+  # Extract states and create a display list and mapping file
+  echo "$states_response" | grep -o '"id":"[^"]*","name":"[^"]*","type":"[^"]*"' | 
+  while read -r line; do
+    state_id=$(echo "$line" | sed -E 's/"id":"([^"]*)","name":"[^"]*","type":"[^"]*"/\1/')
+    state_name=$(echo "$line" | sed -E 's/"id":"[^"]*","name":"([^"]*)","type":"[^"]*"/\1/')
+    state_type=$(echo "$line" | sed -E 's/"id":"[^"]*","name":"[^"]*","type":"([^"]*)"/\1/')
+    
+    # Write to mapping file - tab separated to handle spaces in names
+    echo -e "${state_name} (${state_type})\t${state_id}" >> "$temp_map_file"
+  done
+  
+  # Check if we got any states
+  if [ ! -s "$temp_map_file" ]; then
     echo "Failed to fetch workflow states for team"
     echo "Raw response: $states_response"
+    rm "$temp_map_file"
     return 1
   fi
   
-  # Use fzf to select a state but only show the visible part after |
+  # Use fzf to select a state - display only the state names
   echo "Select a new status for issue $issue_id:"
-  selected_state=$(echo "$states_list" | sed 's/^[^|]*|//' | fzf --height 40% --reverse | 
-    xargs -I {} grep -F "|{}" <<< "$states_list")
+  selected_display=$(cut -f1 "$temp_map_file" | fzf --height 40% --reverse)
   
-  if [ -z "$selected_state" ]; then
+  if [ -z "$selected_display" ]; then
     echo "No workflow state selected."
+    rm "$temp_map_file"
     return 1
   fi
   
-  # Extract state ID
-  state_id=$(echo "$selected_state" | cut -d'|' -f1)
-  state_name=$(echo "$selected_state" | cut -d'|' -f2 | cut -d' ' -f1)
+  # Get the state ID from our mapping file
+  selected_id=$(grep -F "$selected_display"$'\t' "$temp_map_file" | cut -f2)
+  
+  # Clean up temp file
+  rm "$temp_map_file"
+  
+  if [ -z "$selected_id" ]; then
+    echo "Error: Could not find ID for the selected state."
+    return 1
+  fi
+  
+  # Extract readable state name from the selection (remove the type part)
+  state_name=$(echo "$selected_display" | sed -E 's/^([^ ]+).*$/\1/')
   
   # Update the issue
-  echo "Updating issue $issue_id to state: $state_name..."
+  echo "Updating issue $issue_id to state: $state_name (ID: $selected_id)..."
   
-  update_query="{\"query\":\"mutation { issueUpdate(id: \\\"$issue_id\\\", input: { stateId: \\\"$state_id\\\" }) { success } }\"}"
+  update_query="{\"query\":\"mutation { issueUpdate(id: \\\"$issue_id\\\", input: { stateId: \\\"$selected_id\\\" }) { success } }\"}"
   
   update_response=$(curl \
     --header "Content-Type: application/json" \
