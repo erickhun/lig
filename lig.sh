@@ -260,7 +260,7 @@ function lig-branch() {
 # Open a Linear issue from terminal
 function lig-view() {
   check_git_repo || return 1
-  local issue_id
+  local api_key issue_id
   
   # Get the issue ID from either the argument or branch name
   if [ -n "$1" ]; then
@@ -271,7 +271,128 @@ function lig-view() {
     issue_id=$(echo $current_branch | grep -o '^[A-Z0-9]\+-[0-9]\+' || echo "")
   fi
   
-  if [ -n "$issue_id" ]; then
+  if [ -z "$issue_id" ]; then
+    echo "No issue ID provided or found in branch name."
+    return 1
+  fi
+  
+  # Get API key from LINEAR_KEY environment variable
+  api_key=${LINEAR_KEY}
+  
+  if [ -z "$api_key" ]; then
+    echo "LINEAR_KEY environment variable not set"
+    return 1
+  fi
+  
+  # Fetch issue information
+  echo "Fetching issue information..."
+  issue_query="{\"query\":\"query { issue(id: \\\"$issue_id\\\") { id title description createdAt updatedAt priority dueDate assignee { name } team { name } state { name } comments { nodes { id body user { name } createdAt } } } }\"}"
+  
+  issue_response=$(curl \
+    --header "Content-Type: application/json" \
+    --header "Authorization: $api_key" \
+    --silent \
+    --data "$issue_query" \
+    "https://api.linear.app/graphql")
+  
+  # Extract issue details
+  title=$(echo "$issue_response" | grep -o '"title":"[^"]*"' | head -1 | sed 's/"title":"//;s/"//')
+  description=$(echo "$issue_response" | grep -o '"description":"[^"]*"' | sed 's/"description":"//;s/"//')
+  state=$(echo "$issue_response" | grep -o '"state":{"name":"[^"]*"}' | sed 's/"state":{"name":"//;s/"}//')
+  priority=$(echo "$issue_response" | grep -o '"priority":[0-9]*' | cut -d':' -f2)
+  due_date=$(echo "$issue_response" | grep -o '"dueDate":[^,}]*' | cut -d':' -f2 | tr -d '"')
+  assignee=$(echo "$issue_response" | grep -o '"assignee":{"name":"[^"]*"}' | sed 's/"assignee":{"name":"//;s/"}//')
+  team=$(echo "$issue_response" | grep -o '"team":{"name":"[^"]*"}' | sed 's/"team":{"name":"//;s/"}//')
+  created_at=$(echo "$issue_response" | grep -o '"createdAt":"[^"]*"' | head -1 | sed 's/"createdAt":"//;s/"//')
+  updated_at=$(echo "$issue_response" | grep -o '"updatedAt":"[^"]*"' | head -1 | sed 's/"updatedAt":"//;s/"//')
+  
+  # Format priority
+  case $priority in
+    1) priority_display="\033[1;31mUrgent\033[0m" ;;
+    2) priority_display="\033[0;31mHigh\033[0m" ;;
+    3) priority_display="\033[0;33mMedium\033[0m" ;;
+    4) priority_display="\033[0;32mLow\033[0m" ;;
+    *) priority_display="\033[0;37mNo priority\033[0m" ;;
+  esac
+  
+  # Format due date
+  if [ "$due_date" = "null" ]; then
+    due_display="\033[0;37mNone\033[0m"
+  else
+    today=$(date +%Y-%m-%d)
+    if [ "$due_date" = "$today" ]; then
+      due_display="\033[1;33m$due_date (Today)\033[0m"
+    elif [[ "$due_date" < "$today" ]]; then
+      due_display="\033[1;31m$due_date (Overdue)\033[0m"
+    else
+      due_display="\033[0;32m$due_date\033[0m"
+    fi
+  fi
+  
+  # Format dates
+  created_date=$(date -d "$created_at" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$created_at" "+%Y-%m-%d %H:%M" 2>/dev/null)
+  updated_date=$(date -d "$updated_at" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$updated_at" "+%Y-%m-%d %H:%M" 2>/dev/null)
+  
+  # Clear screen for better readability
+  clear
+  
+  # Display formatted issue header with box drawing characters
+  echo "╔════════════════════════════════════════════════════════════════════════════╗"
+  echo -e "║ \033[1;36mISSUE $issue_id\033[0m                                                          ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════╝"
+  echo -e "\033[1;37mTitle:\033[0m $title"
+  echo
+  echo -e "\033[1;37mTeam:\033[0m $team"
+  echo -e "\033[1;37mStatus:\033[0m \033[0;36m$state\033[0m"
+  echo -e "\033[1;37mPriority:\033[0m $priority_display"
+  echo -e "\033[1;37mDue Date:\033[0m $due_display"
+  echo -e "\033[1;37mAssignee:\033[0m ${assignee:-Unassigned}"
+  echo -e "\033[1;37mCreated:\033[0m $created_date"
+  echo -e "\033[1;37mUpdated:\033[0m $updated_date"
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "\033[1;37mDescription:\033[0m"
+  if [ -z "$description" ] || [ "$description" = "null" ]; then
+    echo "  No description provided."
+  else
+    # Format description with line wrapping at 80 chars
+    echo "$description" | fold -s -w 80 | sed 's/^/  /'
+  fi
+  
+  # Extract and display recent comments
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "\033[1;37mRecent Comments:\033[0m"
+  
+  # Get comments
+  comments=$(echo "$issue_response" | grep -o '"comments":{"nodes":\[.*\]}' | sed 's/"comments":{"nodes":\[//;s/\]}$//')
+  
+  if [ -z "$comments" ] || [ "$comments" = "[]" ]; then
+    echo "  No comments."
+  else
+    # This is a simplified version - parsing JSON properly would require jq
+    # Using grep pattern matching as a rudimentary approach
+    echo "$comments" | grep -o '{[^}]*}' | while read -r comment; do
+      comment_user=$(echo "$comment" | grep -o '"user":{"name":"[^"]*"}' | sed 's/"user":{"name":"//;s/"}//')
+      comment_body=$(echo "$comment" | grep -o '"body":"[^"]*"' | sed 's/"body":"//;s/"//')
+      comment_date=$(echo "$comment" | grep -o '"createdAt":"[^"]*"' | sed 's/"createdAt":"//;s/"//')
+      
+      # Format comment date
+      comment_date_fmt=$(date -d "$comment_date" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$comment_date" "+%Y-%m-%d %H:%M" 2>/dev/null)
+      
+      echo -e "  \033[1;34m$comment_user\033[0m (\033[0;37m$comment_date_fmt\033[0m):"
+      echo "$comment_body" | fold -s -w 76 | sed 's/^/    /'
+      echo
+    done
+  fi
+  
+  echo "────────────────────────────────────────────────────────────────────────────"
+  echo -e "Web URL: \033[4;34mhttps://linear.app/issue/$issue_id\033[0m"
+  echo
+  
+  # Ask if user wants to open in browser
+  echo -n "Open in browser? [Y/n] "
+  read open_answer
+  
+  if [[ ! "$open_answer" =~ ^[Nn]$ ]]; then
     # Try to open with xdg-open (Linux), open (macOS), or start (Windows)
     if command -v xdg-open &> /dev/null; then
       xdg-open "https://linear.app/issue/$issue_id"
@@ -282,9 +403,6 @@ function lig-view() {
     else
       echo "Cannot open browser. URL: https://linear.app/issue/$issue_id"
     fi
-  else
-    echo "No issue ID provided or found in branch name."
-    return 1
   fi
 }
 
