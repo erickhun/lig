@@ -289,6 +289,7 @@ function lig-view() {
 }
 
 # Update the status of a Linear issue
+# Update the status of a Linear issue
 function lig-status() {
   check_git_repo || return 1
   local api_key issue_id team_id
@@ -315,9 +316,9 @@ function lig-status() {
     return 1
   fi
   
-  # First get the issue to determine its team
+  # First get the issue to determine its team and other details
   echo "Fetching issue information..."
-  issue_query="{\"query\":\"query { issue(id: \\\"$issue_id\\\") { id team { id name } } }\"}"
+  issue_query="{\"query\":\"query { issue(id: \\\"$issue_id\\\") { id title priority dueDate assignee { name } team { id name } state { name } } }\"}"
   
   issue_response=$(curl \
     --header "Content-Type: application/json" \
@@ -333,13 +334,54 @@ function lig-status() {
   team_name=$(echo "$issue_response" | grep -o '"team":{"id":"[^"]*","name":"[^"]*"}' | 
     sed 's/"team":{"id":"\([^"]*\)","name":"\([^"]*\)"}/\2/')
   
+  # Extract issue title
+  issue_title=$(echo "$issue_response" | grep -o '"title":"[^"]*"' | head -1 | sed 's/"title":"//;s/"//')
+  
+  # Extract current state
+  current_state=$(echo "$issue_response" | grep -o '"state":{"name":"[^"]*"}' | sed 's/"state":{"name":"//;s/"}//')
+  
+  # Extract priority
+  priority=$(echo "$issue_response" | grep -o '"priority":[0-9]*' | cut -d':' -f2)
+  case $priority in
+    1) priority_display="Urgent" ;;
+    2) priority_display="High" ;;
+    3) priority_display="Medium" ;;
+    4) priority_display="Low" ;;
+    *) priority_display="No priority" ;;
+  esac
+  
+  # Extract due date
+  due_date=$(echo "$issue_response" | grep -o '"dueDate":[^,}]*' | cut -d':' -f2 | tr -d '"')
+  if [ "$due_date" = "null" ]; then
+    due_date_display="No due date"
+  else
+    due_date_display="$due_date"
+  fi
+  
+  # Extract assignee
+  assignee=$(echo "$issue_response" | grep -o '"assignee":{"name":"[^"]*"}' | sed 's/"assignee":{"name":"//;s/"}//')
+  if [ -z "$assignee" ] || [ "$assignee" = "null" ]; then
+    assignee_display="Unassigned"
+  else
+    assignee_display="$assignee"
+  fi
+  
   if [ -z "$team_id" ]; then
     echo "Failed to fetch issue team information"
     echo "Raw response: $issue_response"
     return 1
   fi
   
-  echo "Issue belongs to team: $team_name (ID: $team_id)"
+  # Display issue details
+  echo "----------------------------------------------"
+  echo "ISSUE: $issue_id - $issue_title"
+  echo "----------------------------------------------"
+  echo "Team:      $team_name"
+  echo "Status:    $current_state"
+  echo "Priority:  $priority_display"
+  echo "Due Date:  $due_date_display"
+  echo "Assignee:  $assignee_display"
+  echo "----------------------------------------------"
   
   # Get workflow states for this specific team
   echo "Fetching workflow states for team..."
@@ -353,7 +395,7 @@ function lig-status() {
     --data "$states_query" \
     "https://api.linear.app/graphql")
   
-  # Extract states with simple text processing for team-specific states
+  # Extract states and hide the IDs but keep them in the selection data
   states_list=$(echo "$states_response" | grep -o '"id":"[^"]*","name":"[^"]*","type":"[^"]*"' | 
     sed 's/"id":"\([^"]*\)","name":"\([^"]*\)","type":"\([^"]*\)"/\1|\2 (\3)/')
   
@@ -363,9 +405,10 @@ function lig-status() {
     return 1
   fi
   
-  # Use fzf to select a state
+  # Use fzf to select a state but only show the visible part after |
   echo "Select a new status for issue $issue_id:"
-  selected_state=$(echo "$states_list" | fzf --height 40% --reverse)
+  selected_state=$(echo "$states_list" | sed 's/^[^|]*|//' | fzf --height 40% --reverse | 
+    xargs -I {} grep -F "|{}" <<< "$states_list")
   
   if [ -z "$selected_state" ]; then
     echo "No workflow state selected."
