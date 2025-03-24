@@ -66,3 +66,5 @@ lig-status
 ```
 
 
+## Diclaimer
+This tool was create with the help of Claude
