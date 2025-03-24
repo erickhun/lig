@@ -284,6 +284,13 @@ function lig-view() {
     return 1
   fi
   
+  # Check if jq is installed
+  if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed. Please install jq to use this feature."
+    echo "Visit: https://stedolan.github.io/jq/download/"
+    return 1
+  fi
+  
   # Fetch issue information
   echo "Fetching issue information..."
   issue_query="{\"query\":\"query { issue(id: \\\"$issue_id\\\") { id title description createdAt updatedAt priority dueDate assignee { name } team { name } state { name } comments { nodes { id body user { name } createdAt } } } }\"}"
@@ -295,16 +302,28 @@ function lig-view() {
     --data "$issue_query" \
     "https://api.linear.app/graphql")
   
-  # Extract issue details
-  title=$(echo "$issue_response" | grep -o '"title":"[^"]*"' | head -1 | sed 's/"title":"//;s/"//')
-  description=$(echo "$issue_response" | grep -o '"description":"[^"]*"' | sed 's/"description":"//;s/"//')
-  state=$(echo "$issue_response" | grep -o '"state":{"name":"[^"]*"}' | sed 's/"state":{"name":"//;s/"}//')
-  priority=$(echo "$issue_response" | grep -o '"priority":[0-9]*' | cut -d':' -f2)
-  due_date=$(echo "$issue_response" | grep -o '"dueDate":[^,}]*' | cut -d':' -f2 | tr -d '"')
-  assignee=$(echo "$issue_response" | grep -o '"assignee":{"name":"[^"]*"}' | sed 's/"assignee":{"name":"//;s/"}//')
-  team=$(echo "$issue_response" | grep -o '"team":{"name":"[^"]*"}' | sed 's/"team":{"name":"//;s/"}//')
-  created_at=$(echo "$issue_response" | grep -o '"createdAt":"[^"]*"' | head -1 | sed 's/"createdAt":"//;s/"//')
-  updated_at=$(echo "$issue_response" | grep -o '"updatedAt":"[^"]*"' | head -1 | sed 's/"updatedAt":"//;s/"//')
+  # Clean up the response - remove control characters that can cause jq to fail
+  clean_response=$(echo "$issue_response" | tr -d '\000-\037')
+  
+  # Check if we have a valid response
+  if ! echo "$clean_response" | jq -e '.data.issue' > /dev/null 2>&1; then
+    echo "Error fetching issue information. Response:"
+    echo "$clean_response" | jq '.'
+    return 1
+  fi
+  
+  # Extract issue details safely with fallbacks
+  title=$(echo "$clean_response" | jq -r '.data.issue.title // "Unknown"')
+  description=$(echo "$clean_response" | jq -r '.data.issue.description // ""')
+  state=$(echo "$clean_response" | jq -r '.data.issue.state.name // "Unknown"')
+  priority=$(echo "$clean_response" | jq -r '.data.issue.priority')
+  due_date=$(echo "$clean_response" | jq -r '.data.issue.dueDate')
+  
+  # Handle potentially null values
+  assignee=$(echo "$clean_response" | jq -r '.data.issue.assignee.name // "Unassigned"')
+  team=$(echo "$clean_response" | jq -r '.data.issue.team.name // "Unknown"')
+  created_at=$(echo "$clean_response" | jq -r '.data.issue.createdAt // "Unknown"')
+  updated_at=$(echo "$clean_response" | jq -r '.data.issue.updatedAt // "Unknown"')
   
   # Format priority
   case $priority in
@@ -316,7 +335,7 @@ function lig-view() {
   esac
   
   # Format due date
-  if [ "$due_date" = "null" ]; then
+  if [ "$due_date" = "null" ] || [ -z "$due_date" ]; then
     due_display="\033[0;37mNone\033[0m"
   else
     today=$(date +%Y-%m-%d)
@@ -329,9 +348,18 @@ function lig-view() {
     fi
   fi
   
-  # Format dates
-  created_date=$(date -d "$created_at" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$created_at" "+%Y-%m-%d %H:%M" 2>/dev/null)
-  updated_date=$(date -d "$updated_at" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$updated_at" "+%Y-%m-%d %H:%M" 2>/dev/null)
+  # Format dates - handle ISO date format
+  if [ "$created_at" != "null" ] && [ "$created_at" != "Unknown" ]; then
+    created_date=$(echo "$created_at" | sed 's/T/ /;s/\.[0-9]*Z$//')
+  else
+    created_date="Unknown"
+  fi
+  
+  if [ "$updated_at" != "null" ] && [ "$updated_at" != "Unknown" ]; then
+    updated_date=$(echo "$updated_at" | sed 's/T/ /;s/\.[0-9]*Z$//')
+  else
+    updated_date="Unknown"
+  fi
   
   # Clear screen for better readability
   clear
@@ -346,7 +374,7 @@ function lig-view() {
   echo -e "\033[1;37mStatus:\033[0m \033[0;36m$state\033[0m"
   echo -e "\033[1;37mPriority:\033[0m $priority_display"
   echo -e "\033[1;37mDue Date:\033[0m $due_display"
-  echo -e "\033[1;37mAssignee:\033[0m ${assignee:-Unassigned}"
+  echo -e "\033[1;37mAssignee:\033[0m $assignee"
   echo -e "\033[1;37mCreated:\033[0m $created_date"
   echo -e "\033[1;37mUpdated:\033[0m $updated_date"
   echo "────────────────────────────────────────────────────────────────────────────"
@@ -355,33 +383,29 @@ function lig-view() {
     echo "  No description provided."
   else
     # Format description with line wrapping at 80 chars
-    echo "$description" | fold -s -w 80 | sed 's/^/  /'
+    echo "$description" | tr -d '\000-\037' | fold -s -w 80 | sed 's/^/  /'
   fi
   
-  # Extract and display recent comments
+  # Extract and display recent comments - with safer handling
   echo "────────────────────────────────────────────────────────────────────────────"
   echo -e "\033[1;37mRecent Comments:\033[0m"
   
-  # Get comments
-  comments=$(echo "$issue_response" | grep -o '"comments":{"nodes":\[.*\]}' | sed 's/"comments":{"nodes":\[//;s/\]}$//')
-  
-  if [ -z "$comments" ] || [ "$comments" = "[]" ]; then
-    echo "  No comments."
-  else
-    # This is a simplified version - parsing JSON properly would require jq
-    # Using grep pattern matching as a rudimentary approach
-    echo "$comments" | grep -o '{[^}]*}' | while read -r comment; do
-      comment_user=$(echo "$comment" | grep -o '"user":{"name":"[^"]*"}' | sed 's/"user":{"name":"//;s/"}//')
-      comment_body=$(echo "$comment" | grep -o '"body":"[^"]*"' | sed 's/"body":"//;s/"//')
-      comment_date=$(echo "$comment" | grep -o '"createdAt":"[^"]*"' | sed 's/"createdAt":"//;s/"//')
-      
-      # Format comment date
-      comment_date_fmt=$(date -d "$comment_date" "+%Y-%m-%d %H:%M" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S.000Z" "$comment_date" "+%Y-%m-%d %H:%M" 2>/dev/null)
-      
-      echo -e "  \033[1;34m$comment_user\033[0m (\033[0;37m$comment_date_fmt\033[0m):"
-      echo "$comment_body" | fold -s -w 76 | sed 's/^/    /'
-      echo
+  # Check if comments data exists safely
+  if echo "$clean_response" | jq -e '.data.issue.comments.nodes | length > 0' > /dev/null 2>&1; then
+    # Process comments more safely
+    echo "$clean_response" | jq -r '.data.issue.comments.nodes[] | 
+      "  \u001b[1;34m" + 
+      (if .user != null and .user.name != null then .user.name else "Unknown User" end) + 
+      "\u001b[0m (\u001b[0;37m" + 
+      (if .createdAt != null then (.createdAt | sub("T"; " ") | sub("\\.[0-9]*Z$"; "")) else "Unknown Date" end) + 
+      "\u001b[0m):\n" + 
+      (if .body != null then .body else "No content" end)' |
+    while IFS= read -r line; do
+      # Process and format each line of the comment
+      echo "$line" | fold -s -w 76 | sed 's/^/    /'
     done
+  else
+    echo "  No comments."
   fi
   
   echo "────────────────────────────────────────────────────────────────────────────"
