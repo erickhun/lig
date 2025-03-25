@@ -66,6 +66,9 @@ lig-status ABC-123
 lig-status
 ```
 
+## Improvements:
+Add suport for other tracking system: g(it)ig, j(ira)ig, m(onday)ig, etc...
+
 
 ## Diclaimer
 This tool was create with the help of Claude
